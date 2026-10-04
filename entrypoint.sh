@@ -239,7 +239,7 @@ if len(text) > limit:
         text += "\n```"
     text += "\n\n... *(Release notes truncated due to length limits)*"
 
-    print(text, end="")
+print(text, end="")
 PY
 }
 
@@ -252,8 +252,6 @@ import re
 
 text = os.environ.get("TEXT", "")
 
-# 将未转义的 & 修复为 &amp;
-# 已经是合法 HTML 实体的 & 不重复转义。
 text = re.sub(
     r"&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)",
     "&amp;",
@@ -424,7 +422,16 @@ if [[ -z "${INPUT_MESSAGE:-}" ]] && [[ -z "${RELEASE_NOTES}" ]]; then
     fi
 fi
 
-MESSAGE="${INPUT_MESSAGE:-${RELEASE_NOTES:-No release notes provided.}}"
+RAW_MESSAGE="${INPUT_MESSAGE:-}"
+if [[ -z "$RAW_MESSAGE" ]]; then
+    RAW_MESSAGE="${RELEASE_NOTES:-}"
+fi
+
+if [[ -z "$RAW_MESSAGE" ]]; then
+    RAW_MESSAGE="No release notes provided."
+fi
+
+MESSAGE="$RAW_MESSAGE"
 
 # URL decoration
 decorate_url() {
@@ -486,27 +493,50 @@ render_template() {
 
     case "$template_kind" in
         html_doc)
-            # Email：移除 commit id 后转 HTML
             local _msg_clean
             _msg_clean=$(preprocess_changelog "email" "$MESSAGE")
+            if [[ -z "$_msg_clean" && -n "$MESSAGE" ]]; then
+                _msg_clean="$MESSAGE"
+            fi
+
             processed_msg=$(convert_markdown "html" "$_msg_clean")
+            if [[ -z "$processed_msg" && -n "$_msg_clean" ]]; then
+                processed_msg="$_msg_clean"
+            fi
+
             summary_section="${SUMMARY_SECTION_HTML}"
             ;;
+
         telegram_html)
-            # Telegram：处理后转为纯净的 Telegram HTML 格式 (<b>, <a>, <code>)
             local _msg_clean
             _msg_clean=$(preprocess_changelog "telegram" "$MESSAGE")
+            if [[ -z "$_msg_clean" && -n "$MESSAGE" ]]; then
+                _msg_clean="$MESSAGE"
+            fi
+
             processed_msg=$(convert_markdown "telegram" "$_msg_clean")
+            if [[ -z "$processed_msg" && -n "$_msg_clean" ]]; then
+                processed_msg="$_msg_clean"
+            fi
+
             summary_section="${SUMMARY_SECTION_TG}"
             ;;
+
         markdown)
-            # Markdown 渠道（bark/ntfy/slack/dingtalk）：移除 commit id
             processed_msg=$(preprocess_changelog "markdown" "$MESSAGE")
+            if [[ -z "$processed_msg" && -n "$MESSAGE" ]]; then
+                processed_msg="$MESSAGE"
+            fi
+
             summary_section="${SUMMARY_SECTION_MD}"
             ;;
+
         *)
-            # 纯文本：移除 commit id
             processed_msg=$(preprocess_changelog "text" "$MESSAGE")
+            if [[ -z "$processed_msg" && -n "$MESSAGE" ]]; then
+                processed_msg="$MESSAGE"
+            fi
+
             summary_section="${SUMMARY_SECTION_TEXT}"
             ;;
     esac
