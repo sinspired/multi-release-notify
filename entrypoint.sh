@@ -342,21 +342,16 @@ class TreeParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
-
         node = Node(tag, attrs)
         self.stack[-1].children.append(node)
-
         if tag not in VOID_TAGS:
             self.stack.append(node)
 
     def handle_startendtag(self, tag, attrs):
-        self.stack[-1].children.append(
-            Node(tag.lower(), attrs)
-        )
+        self.stack[-1].children.append(Node(tag.lower(), attrs))
 
     def handle_endtag(self, tag):
         tag = tag.lower()
-
         for i in range(len(self.stack) - 1, 0, -1):
             if self.stack[i].tag == tag:
                 del self.stack[i:]
@@ -364,13 +359,10 @@ class TreeParser(HTMLParser):
 
     def handle_data(self, data):
         if data:
-            self.stack[-1].children.append(
-                Node(None, text=data)
-            )
+            self.stack[-1].children.append(Node(None, text=data))
 
     def handle_comment(self, data):
-        # GitHub HTML comments such as <!-- Android -->
-        # do not belong in Telegram output.
+        # GitHub HTML comments such as <!-- Android --> do not belong in Telegram output.
         pass
 
 
@@ -380,13 +372,10 @@ class TreeParser(HTMLParser):
 
 def descendants(node, tag):
     result = []
-
     for child in node.children:
         if child.tag == tag:
             result.append(child)
-
         result.extend(descendants(child, tag))
-
     return result
 
 
@@ -395,53 +384,42 @@ def text_content(node, preserve=False):
 
     def walk(current):
         if current.tag is None:
-            parts.append(current.text)
+            parts.append(current.text or "")
             return
-
         if current.tag == "img":
             parts.append(current.attrs.get("alt", ""))
             return
-
         if current.tag == "br":
             parts.append("\n")
             return
-
         for child in current.children:
             walk(child)
 
     walk(node)
-
     text = "".join(parts)
-
     if preserve:
         return text
-
     return re.sub(r"\s+", " ", text).strip()
 
 
 def merge_rich(parts):
     result = []
-
     for part in parts:
         if part is None or part == "" or part == []:
             continue
-
         if isinstance(part, list):
             result.extend(part)
         else:
             result.append(part)
-
     if not result:
         return ""
-
     if len(result) == 1:
         return result[0]
-
     return result
 
 
 # ---------------------------------------------------------------------------
-# RichText
+# RichText (inline)
 # ---------------------------------------------------------------------------
 
 def render_inline_nodes(nodes):
@@ -449,7 +427,8 @@ def render_inline_nodes(nodes):
 
     for node in nodes:
         if node.tag is None:
-            parts.append(node.text)
+            if node.text:
+                parts.append(node.text)
             continue
 
         tag = node.tag
@@ -458,8 +437,7 @@ def render_inline_nodes(nodes):
             parts.append("\n")
 
         elif tag == "img":
-            # Media cannot appear inside RichBlockTableCell.
-            # Use the image alt text instead.
+            # Media cannot appear inside RichBlockTableCell. Use alt text.
             alt = node.attrs.get("alt", "")
             if alt:
                 parts.append(alt)
@@ -467,49 +445,37 @@ def render_inline_nodes(nodes):
         elif tag in ("b", "strong"):
             parts.append({
                 "type": "bold",
-                "text": merge_rich(
-                    render_inline_nodes(node.children)
-                ),
+                "text": merge_rich(render_inline_nodes(node.children)),
             })
 
         elif tag in ("i", "em"):
             parts.append({
                 "type": "italic",
-                "text": merge_rich(
-                    render_inline_nodes(node.children)
-                ),
+                "text": merge_rich(render_inline_nodes(node.children)),
             })
 
         elif tag in ("u", "ins"):
             parts.append({
                 "type": "underline",
-                "text": merge_rich(
-                    render_inline_nodes(node.children)
-                ),
+                "text": merge_rich(render_inline_nodes(node.children)),
             })
 
         elif tag in ("s", "strike", "del"):
             parts.append({
                 "type": "strikethrough",
-                "text": merge_rich(
-                    render_inline_nodes(node.children)
-                ),
+                "text": merge_rich(render_inline_nodes(node.children)),
             })
 
         elif tag == "mark":
             parts.append({
                 "type": "marked",
-                "text": merge_rich(
-                    render_inline_nodes(node.children)
-                ),
+                "text": merge_rich(render_inline_nodes(node.children)),
             })
 
         elif tag == "tg-spoiler":
             parts.append({
                 "type": "spoiler",
-                "text": merge_rich(
-                    render_inline_nodes(node.children)
-                ),
+                "text": merge_rich(render_inline_nodes(node.children)),
             })
 
         elif tag == "code":
@@ -520,11 +486,7 @@ def render_inline_nodes(nodes):
 
         elif tag == "a":
             href = node.attrs.get("href", "")
-
-            child = merge_rich(
-                render_inline_nodes(node.children)
-            )
-
+            child = merge_rich(render_inline_nodes(node.children))
             if href:
                 parts.append({
                     "type": "url",
@@ -535,9 +497,8 @@ def render_inline_nodes(nodes):
                 parts.append(child)
 
         else:
-            parts.append(
-                render_inline_nodes(node.children)
-            )
+            # Transparent unknown inline tags
+            parts.append(render_inline_nodes(node.children))
 
     return parts
 
@@ -547,13 +508,9 @@ def render_inline_nodes(nodes):
 # ---------------------------------------------------------------------------
 
 def render_paragraph(node):
-    rich = merge_rich(
-        render_inline_nodes(node.children)
-    )
-
-    if not rich:
+    rich = merge_rich(render_inline_nodes(node.children))
+    if not rich or (isinstance(rich, str) and not rich.strip()):
         return None
-
     return {
         "type": "paragraph",
         "text": rich,
@@ -563,62 +520,38 @@ def render_paragraph(node):
 def render_list(node):
     items = []
 
-    for li in [
-        child for child in node.children
-        if child.tag == "li"
-    ]:
+    for li in [child for child in node.children if child.tag == "li"]:
         content_nodes = [
-            child
-            for child in li.children
+            child for child in li.children
             if child.tag not in ("ul", "ol")
         ]
 
         blocks = []
-
-        rich = merge_rich(
-            render_inline_nodes(content_nodes)
-        )
-
+        rich = merge_rich(render_inline_nodes(content_nodes))
         if rich:
             blocks.append({
                 "type": "paragraph",
                 "text": rich,
             })
 
-        for nested in [
-            child
-            for child in li.children
-            if child.tag in ("ul", "ol")
-        ]:
-            blocks.extend(
-                render_blocks(nested)
-            )
+        for nested in [child for child in li.children if child.tag in ("ul", "ol")]:
+            blocks.extend(render_blocks(nested))
 
         item = {
-            "blocks": blocks or [
-                {
-                    "type": "paragraph",
-                    "text": "",
-                }
-            ]
+            "blocks": blocks or [{"type": "paragraph", "text": ""}]
         }
 
-        # GitHub task list
+        # GitHub / Markdown task list checkbox
         checkbox = next(
             (
-                child
-                for child in li.children
-                if child.tag == "input"
-                and child.attrs.get("type") == "checkbox"
+                child for child in li.children
+                if child.tag == "input" and child.attrs.get("type") == "checkbox"
             ),
             None,
         )
-
         if checkbox is not None:
             item["has_checkbox"] = True
-            item["is_checked"] = (
-                "checked" in checkbox.attrs
-            )
+            item["is_checked"] = "checked" in checkbox.attrs
 
         if node.tag == "ol":
             item["value"] = len(items) + 1
@@ -636,58 +569,32 @@ def render_list(node):
 
 def render_table(node):
     rows = descendants(node, "tr")
-
     output_rows = []
 
     for row in rows:
         cells = []
-
-        for cell in [
-            child
-            for child in row.children
-            if child.tag in ("th", "td")
-        ]:
+        for cell in [child for child in row.children if child.tag in ("th", "td")]:
             cell_obj = {
-                "text": (
-                    merge_rich(
-                        render_inline_nodes(
-                            cell.children
-                        )
-                    )
-                    or ""
-                )
+                "text": merge_rich(render_inline_nodes(cell.children)) or ""
             }
 
             if cell.tag == "th":
                 cell_obj["is_header"] = True
 
-            for attr, key in (
-                ("rowspan", "rowspan"),
-                ("colspan", "colspan"),
-            ):
+            for attr, key in (("rowspan", "rowspan"), ("colspan", "colspan")):
                 try:
-                    value = int(
-                        cell.attrs.get(attr, "1")
-                    )
-
+                    value = int(cell.attrs.get(attr, "1"))
                     if value > 1:
                         cell_obj[key] = value
-
                 except (TypeError, ValueError):
                     pass
 
             align = cell.attrs.get("align")
-
             if align in ("left", "center", "right"):
                 cell_obj["align"] = align
 
             valign = cell.attrs.get("valign")
-
-            if valign in (
-                "top",
-                "middle",
-                "bottom",
-            ):
+            if valign in ("top", "middle", "bottom"):
                 cell_obj["valign"] = valign
 
             cells.append(cell_obj)
@@ -698,15 +605,20 @@ def render_table(node):
     if not output_rows:
         return None
 
-    max_columns = max(
-        len(row)
-        for row in output_rows
-    )
+    max_columns = max(len(row) for row in output_rows)
 
+    # Official limit: max 20 columns
     if max_columns > 20:
         return {
             "type": "paragraph",
             "text": "Table omitted: more than 20 columns.",
+        }
+
+    # Soft limit to avoid exploding block count
+    if len(output_rows) > 80:
+        return {
+            "type": "paragraph",
+            "text": f"Table omitted: too many rows ({len(output_rows)}).",
         }
 
     table = {
@@ -718,21 +630,11 @@ def render_table(node):
     }
 
     caption = next(
-        (
-            child
-            for child in node.children
-            if child.tag == "caption"
-        ),
+        (child for child in node.children if child.tag == "caption"),
         None,
     )
-
     if caption:
-        caption_text = merge_rich(
-            render_inline_nodes(
-                caption.children
-            )
-        )
-
+        caption_text = merge_rich(render_inline_nodes(caption.children))
         if caption_text:
             table["caption"] = caption_text
 
@@ -741,84 +643,48 @@ def render_table(node):
 
 def render_blocks(node):
     result = []
-
     tag = node.tag
 
     if tag in (
-        "__root__",
-        "div",
-        "section",
-        "article",
-        "main",
-        "thead",
-        "tbody",
-        "tfoot",
+        "__root__", "div", "section", "article", "main",
+        "thead", "tbody", "tfoot",
     ):
         for child in node.children:
-            result.extend(
-                render_blocks(child)
-            )
-
+            result.extend(render_blocks(child))
         return result
 
     if tag == "p":
         block = render_paragraph(node)
         return [block] if block else []
 
-    if tag in (
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-    ):
-        rich = merge_rich(
-            render_inline_nodes(node.children)
-        )
-
+    if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+        rich = merge_rich(render_inline_nodes(node.children))
         if not rich:
             return []
-
         return [{
-            "type": "heading",
+            "type": "heading",          # Official type is "heading"
             "text": rich,
             "size": int(tag[1]),
         }]
 
     if tag == "pre":
-        code = next(
-            iter(
-                descendants(node, "code")
-            ),
-            None,
-        )
-
-        raw = text_content(
-            node,
-            preserve=True,
-        ).strip("\n")
-
+        code = next(iter(descendants(node, "code")), None)
+        raw = text_content(node, preserve=True).strip("\n")
         block = {
             "type": "pre",
             "text": raw,
         }
-
         if code:
             match = re.search(
                 r"(?:^|\s)language-([\w+-]+)",
                 code.attrs.get("class", ""),
             )
-
             if match:
                 block["language"] = match.group(1)
-
         return [block]
 
     if tag == "hr":
-        return [{
-            "type": "divider"
-        }]
+        return [{"type": "divider"}]
 
     if tag in ("ul", "ol"):
         block = render_list(node)
@@ -826,33 +692,22 @@ def render_blocks(node):
 
     if tag == "blockquote":
         if "expandable" in node.attrs:
-            rich = merge_rich(
-                render_inline_nodes(
-                    node.children
-                )
-            )
-
+            rich = merge_rich(render_inline_nodes(node.children))
             if rich:
                 return [{
                     "type": "expandable_blockquote",
                     "text": rich,
                 }]
-
             return []
 
         inner = []
-
         for child in node.children:
-            inner.extend(
-                render_blocks(child)
-            )
-
+            inner.extend(render_blocks(child))
         if inner:
             return [{
                 "type": "blockquote",
                 "blocks": inner,
             }]
-
         return []
 
     if tag == "table":
@@ -860,41 +715,20 @@ def render_blocks(node):
         return [block] if block else []
 
     if tag is None:
-        text = re.sub(
-            r"\s+",
-            " ",
-            node.text,
-        ).strip()
-
+        text = re.sub(r"\s+", " ", node.text or "").strip()
         if text:
             return [{
                 "type": "paragraph",
                 "text": text,
             }]
-
         return []
 
-    # Unknown tags are transparent unless they contain
-    # pure inline content.
-    rich = merge_rich(
-        render_inline_nodes(node.children)
-    )
-
+    # Unknown tags: treat as transparent unless pure inline content
+    rich = merge_rich(render_inline_nodes(node.children))
     child_has_block = any(
         child.tag in (
-            "p",
-            "h1",
-            "h2",
-            "h3",
-            "h4",
-            "h5",
-            "h6",
-            "ul",
-            "ol",
-            "blockquote",
-            "table",
-            "pre",
-            "hr",
+            "p", "h1", "h2", "h3", "h4", "h5", "h6",
+            "ul", "ol", "blockquote", "table", "pre", "hr",
         )
         for child in node.children
     )
@@ -906,10 +740,7 @@ def render_blocks(node):
         }]
 
     for child in node.children:
-        result.extend(
-            render_blocks(child)
-        )
-
+        result.extend(render_blocks(child))
     return result
 
 
@@ -921,63 +752,68 @@ def markdown_to_root(source):
     try:
         import markdown
     except ImportError as exc:
-        raise RuntimeError(
-            "Python package 'markdown' is required."
-        ) from exc
+        raise RuntimeError("Python package 'markdown' is required.") from exc
 
     html = markdown.markdown(
         source,
-        extensions=["extra"],
+        extensions=["extra"],   # includes tables, fenced_code, etc.
     )
 
     parser = TreeParser()
-
     parser.feed(html)
     parser.close()
-
     return parser.root
 
 
-with open(
-    SOURCE_FILE,
-    "r",
-    encoding="utf-8",
-) as f:
+# ---------------------------------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------------------------------
+
+with open(SOURCE_FILE, "r", encoding="utf-8") as f:
     source = f.read()
 
+# 1. Global cleanups (same as preprocess_changelog for telegram_rich)
+source = re.sub(r'(?m)\b[0-9a-f]{40}:\s*', '', source)
 
-# Telegram-specific preprocessing.
 source = re.sub(
-    r"\[[^\]]*\]\(https://t\.me/([^)]+)\)",
-    r"@\1",
+    r'\[[^\]]*\]\(https://t\.me/([^)]+)\)',
+    r'@\1',
     source,
 )
 
 source = re.sub(
-    r"\s*\(\[`[0-9a-f]{4,40}`\]"
-    r"\(https://[^)]+/commit/[^)]+\)\)",
-    "",
+    r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)',
+    '',
     source,
 )
 
-# Remove badge-only Markdown lines.
+# Remove badge-only Markdown lines
 source = re.sub(
-    r"(?m)^[ \t]*"
-    r"(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+"
-    r"\n?",
-    "",
+    r'(?m)^[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+\n?',
+    '',
     source,
 )
 
-source = re.sub(
-    r"\n{3,}",
-    "\n\n",
-    source,
-)
+source = re.sub(r'\n{3,}', '\n\n', source)
+
+# 2. Task list enhancement: convert - [ ] / - [x] to HTML checkboxes
+#    so the later checkbox detection works.
+def convert_task_lists(text: str) -> str:
+    def replacer(m):
+        indent = m.group(1)
+        checked = ' checked' if m.group(2).lower() == 'x' else ''
+        content = m.group(3)
+        return f'{indent}- <input type="checkbox"{checked} disabled> {content}'
+    return re.sub(
+        r'(?m)^(\s*)[-*+]\s+\[([ xX])\]\s+(.*)$',
+        replacer,
+        text,
+    )
+
+source = convert_task_lists(source)
 
 
 root = markdown_to_root(source)
-
 release_blocks = render_blocks(root)
 
 
@@ -994,18 +830,11 @@ if TITLE:
         "size": 2,
     })
 
-blocks.append({
-    "type": "divider",
-})
-
+blocks.append({"type": "divider"})
 
 if SUMMARY:
     summary_root = markdown_to_root(SUMMARY)
-
-    summary_blocks = render_blocks(
-        summary_root
-    )
-
+    summary_blocks = render_blocks(summary_root)
     blocks.append({
         "type": "details",
         "summary": "📋 Summary",
@@ -1023,7 +852,8 @@ blocks.append({
 })
 
 
-MAX_TEMPLATE_BYTES = 34000
+MAX_TEMPLATE_BYTES = 32000   # closer to official ~32768 char limit
+MAX_BLOCKS = 480             # official limit is 500, leave headroom
 
 
 def footer_block():
@@ -1036,7 +866,6 @@ def footer_block():
                 "url": RELEASE_URL,
             }],
         }
-
     return {
         "type": "footer",
         "text": "View on GitHub →",
@@ -1045,17 +874,8 @@ def footer_block():
 
 def make_payload(release):
     return {
-        "blocks": (
-            blocks
-            + release
-            + [footer_block()]
-        )
+        "blocks": blocks + release + [footer_block()]
     }
-
-
-payload = make_payload(
-    release_blocks
-)
 
 
 def payload_size(value):
@@ -1064,47 +884,60 @@ def payload_size(value):
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    return len(encoded.encode("utf-8"))
 
-    return len(
-        encoded.encode("utf-8")
+
+def count_blocks(blks):
+    total = 0
+    for b in blks:
+        if not isinstance(b, dict):
+            continue
+        total += 1
+        if "blocks" in b:
+            total += count_blocks(b["blocks"])
+        if "items" in b:
+            for item in b.get("items", []):
+                total += count_blocks(item.get("blocks", []))
+        if "cells" in b:
+            # each cell counts toward the block budget
+            total += sum(len(row) for row in b["cells"])
+    return total
+
+
+payload = make_payload(release_blocks)
+
+
+def is_too_large(p):
+    return (
+        payload_size(p) > MAX_TEMPLATE_BYTES
+        or count_blocks(p["blocks"]) > MAX_BLOCKS
     )
 
 
-# Rich template files are also limited by Apprise.
-# Trim whole release blocks rather than corrupting
-# HTML/Markdown in the middle of a table or code block.
-if payload_size(payload) > MAX_TEMPLATE_BYTES:
-    while (
-        release_blocks
-        and payload_size(payload) > 33000
-    ):
+# Trim whole release blocks rather than corrupting mid-table / mid-code
+if is_too_large(payload):
+    while release_blocks and is_too_large(payload):
         release_blocks.pop()
-        payload = make_payload(
-            release_blocks
-        )
+        payload = make_payload(release_blocks)
 
     release_blocks.append({
         "type": "footer",
-        "text": "… Release notes truncated.",
+        "text": "… Release notes truncated due to length limits.",
     })
-
-    payload = make_payload(
-        release_blocks
-    )
+    payload = make_payload(release_blocks)
 
 
-with open(
-    OUTPUT_FILE,
-    "w",
-    encoding="utf-8",
-) as f:
+# Final cleanup: remove any completely empty blocks
+payload["blocks"] = [b for b in payload["blocks"] if b]
+
+
+with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(
         payload,
         f,
         ensure_ascii=False,
         separators=(",", ":"),
     )
-
 PY
     then
         rm -f "$source_file" "$template_file"
@@ -1112,7 +945,6 @@ PY
     fi
 
     rm -f "$source_file"
-
     printf '%s\n' "$template_file"
 }
 
