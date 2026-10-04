@@ -425,6 +425,29 @@ def merge_rich(parts):
 def render_inline_nodes(nodes):
     parts = []
 
+    def img_fallback_text(node):
+        """优先 alt，其次从 shields.io / badge URL 提取文字，最后用文件名"""
+        alt = (node.attrs.get("alt") or "").strip()
+        if alt:
+            return alt
+
+        src = node.attrs.get("src", "") or ""
+        # shields.io / custom-icon-badges 常见格式
+        # https://img.shields.io/badge/APK-ARMv8-168039.svg?logo=android
+        # https://custom-icon-badges.demolab.com/badge/Setup-x64-2d7d9a.svg?logo=windows11
+        m = re.search(r'/badge/([^/?#]+)', src)
+        if m:
+            # 把 APK-ARMv8 变成 APK ARMv8
+            label = m.group(1).replace('%20', ' ').replace('_', ' ').replace('-', ' ')
+            return label
+
+        # 普通图片，尝试取文件名
+        filename = src.rstrip('/').split('/')[-1]
+        if filename and not filename.startswith('?'):
+            return filename.split('?')[0]
+
+        return ""
+
     for node in nodes:
         if node.tag is None:
             if node.text:
@@ -437,10 +460,10 @@ def render_inline_nodes(nodes):
             parts.append("\n")
 
         elif tag == "img":
-            # Media cannot appear inside RichBlockTableCell. Use alt text.
-            alt = node.attrs.get("alt", "")
-            if alt:
-                parts.append(alt)
+            # 表格单元格内不能放真正图片，只能用文字代替
+            text = img_fallback_text(node)
+            if text:
+                parts.append(text)
 
         elif tag in ("b", "strong"):
             parts.append({
@@ -487,17 +510,34 @@ def render_inline_nodes(nodes):
         elif tag == "a":
             href = node.attrs.get("href", "")
             child = merge_rich(render_inline_nodes(node.children))
-            if href:
+
+            # 如果链接内容只是一个图片且没有文字，用图片文字作为链接文字
+            if not child or (isinstance(child, str) and not child.strip()):
+                # 再尝试从子节点的 img 提取
+                for c in node.children:
+                    if c.tag == "img":
+                        child = img_fallback_text(c)
+                        break
+
+            if href and child:
                 parts.append({
                     "type": "url",
                     "text": child,
                     "url": href,
                 })
-            else:
+            elif child:
                 parts.append(child)
+            elif href:
+                # 最后的兜底：显示域名或文件名
+                short = href.split('/')[-1] or href
+                parts.append({
+                    "type": "url",
+                    "text": short,
+                    "url": href,
+                })
 
         else:
-            # Transparent unknown inline tags
+            # 透明未知标签
             parts.append(render_inline_nodes(node.children))
 
     return parts
@@ -838,7 +878,7 @@ if SUMMARY:
     blocks.append({
         "type": "details",
         "summary": "📋 Summary",
-        "is_open": False,
+        "is_open": True,
         "blocks": summary_blocks or [{
             "type": "paragraph",
             "text": SUMMARY,
