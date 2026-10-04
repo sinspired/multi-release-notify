@@ -426,12 +426,16 @@ def render_inline_nodes(nodes):
     parts = []
 
     def filename_from_url(url: str) -> str:
-        """从下载链接提取干净的文件名"""
+        """从下载链接提取干净的文件名（支持无后缀名的二进制文件）"""
         if not url:
             return ""
+        # 去掉查询参数和锚点
         path = url.split('?')[0].split('#')[0]
         name = path.rstrip('/').split('/')[-1]
-        if name and '.' in name and not name.startswith('.'):
+
+        # 只要最后一段不是空的，就认为是文件名
+        # （支持无后缀名的 Linux 二进制文件）
+        if name and not name.startswith('.'):
             return name
         return ""
 
