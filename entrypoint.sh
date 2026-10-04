@@ -79,14 +79,14 @@ def md_to_telegram(s: str) -> str:
     blocks = []
     def save_block(m):
         blocks.append(f"<pre>{m.group(1)}</pre>")
-        return f"__CODEBLOCK_{len(blocks)-1}__"
+        return f"@@CODEBLOCK_{len(blocks)-1}@@"
     s = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n?```", save_block, s, flags=re.DOTALL)
 
     # 2. 提取并保护行内代码
     inlines = []
     def save_inline(m):
         inlines.append(f"<code>{m.group(1)}</code>")
-        return f"__INLINE_{len(inlines)-1}__"
+        return f"@@INLINE_{len(inlines)-1}@@"
     s = re.sub(r"`([^`\n]+)`", save_inline, s)
 
     # 3. 处理基础 Markdown
@@ -101,9 +101,9 @@ def md_to_telegram(s: str) -> str:
 
     # 5. 还原行内代码和代码块
     for i, inline in enumerate(inlines):
-        s = s.replace(f"__INLINE_{i}__", inline)
+        s = s.replace(f"@@INLINE_{i}@@", inline)
     for i, block in enumerate(blocks):
-        s = s.replace(f"__CODEBLOCK_{i}__", block)
+        s = s.replace(f"@@CODEBLOCK_{i}@@", block)
 
     # 清理多余空行
     s = re.sub(r"\n{3,}", "\n\n", s)
