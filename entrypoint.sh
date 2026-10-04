@@ -220,10 +220,10 @@ if mode in ("telegram", "telegram_rich"):
         text
     )
 
-    # 保留 GitHub commit 短 hash，并让它可点击
+    # 保留 GitHub commit 短 hash，纯链接可点击（不带代码样式）
     source = re.sub(
         r'\(\[`([0-9a-f]{4,40})`\]\((https://[^)]+/commit/[^)]+)\)\)',
-        r'([`\1`](\2))',
+        r'([\1](\2))',
         source,
     )
 
@@ -840,10 +840,10 @@ source = re.sub(
     source,
 )
 
-# 保留 GitHub commit 短 hash，并让它可点击
+# 保留 GitHub commit 短 hash，纯链接可点击（不带代码样式）
 source = re.sub(
     r'\(\[`([0-9a-f]{4,40})`\]\((https://[^)]+/commit/[^)]+)\)\)',
-    r'([`\1`](\2))',
+    r'([\1](\2))',
     source,
 )
 
