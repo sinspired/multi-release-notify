@@ -429,32 +429,15 @@ def render_inline_nodes(nodes):
         """从下载链接提取干净的文件名"""
         if not url:
             return ""
-        # 去掉查询参数和锚点
         path = url.split('?')[0].split('#')[0]
         name = path.rstrip('/').split('/')[-1]
-        # 简单过滤一下无意义的情况
         if name and '.' in name and not name.startswith('.'):
             return name
         return ""
 
-    def img_fallback_text(node):
-        """图片文字兜底（仅在没有更好选择时使用）"""
-        alt = (node.attrs.get("alt") or "").strip()
-        if alt:
-            return alt
-
-        src = node.attrs.get("src", "") or ""
-        m = re.search(r'/badge/([^/?#]+)', src)
-        if m:
-            # 只取 badge 文字部分，去掉颜色
-            label = m.group(1)
-            # 常见格式：APK-ARMv8-168039 或 APK-ARMv8_Lite-96ed89
-            # 我们只保留前面有意义的部分
-            parts = re.split(r'[-_](?=[0-9a-fA-F]{3,8}$)', label)
-            label = parts[0] if parts else label
-            return label.replace('_', ' ').replace('-', ' ').strip()
-
-        return ""
+    def get_img_alt(node):
+        """只返回真正的 alt，没有就返回空字符串"""
+        return (node.attrs.get("alt") or "").strip()
 
     for node in nodes:
         if node.tag is None:
@@ -468,10 +451,11 @@ def render_inline_nodes(nodes):
             parts.append("\n")
 
         elif tag == "img":
-            # 单独图片（不在链接里）才用这个
-            text = img_fallback_text(node)
-            if text:
-                parts.append(text)
+            # 单独出现的图片（不在 <a> 里）才处理
+            alt = get_img_alt(node)
+            if alt:
+                parts.append(alt)
+            # 没有 alt 就忽略，避免产生无意义文字
 
         elif tag in ("b", "strong"):
             parts.append({
@@ -517,43 +501,58 @@ def render_inline_nodes(nodes):
 
         elif tag == "a":
             href = node.attrs.get("href", "")
-            child = merge_rich(render_inline_nodes(node.children))
 
-            # 核心优化：如果链接内容几乎是空的（只有图片），优先用下载文件名
-            has_meaningful_text = child and (
-                not isinstance(child, str) or child.strip()
+            # 检查这个链接是否主要是「图片链接」（badge 下载按钮）
+            img_nodes = [c for c in node.children if c.tag == "img"]
+            text_nodes = [c for c in node.children if c.tag is None and (c.text or "").strip()]
+            other_nodes = [c for c in node.children if c.tag not in (None, "img", "br")]
+
+            is_image_link = (
+                len(img_nodes) >= 1
+                and not text_nodes
+                and not other_nodes
             )
 
-            if not has_meaningful_text and href:
-                # 优先用链接里的文件名
-                fname = filename_from_url(href)
-                if fname:
-                    child = fname
+            if is_image_link:
+                # ========== 你要求的规则 ==========
+                # 1. 优先用 img 的 alt
+                alt = get_img_alt(img_nodes[0])
+                if alt:
+                    display = alt
                 else:
-                    # 再尝试从图片提取
-                    for c in node.children:
-                        if c.tag == "img":
-                            child = img_fallback_text(c)
-                            break
+                    # 2. 没有 alt → 用 href 的文件名
+                    display = filename_from_url(href) or href
+                # =================================
 
-            if href and child:
-                parts.append({
-                    "type": "url",
-                    "text": child,
-                    "url": href,
-                })
-            elif child:
-                parts.append(child)
-            elif href:
-                # 最终兜底
-                short = filename_from_url(href) or href.split('/')[-1] or href
-                parts.append({
-                    "type": "url",
-                    "text": short,
-                    "url": href,
-                })
+                if href:
+                    parts.append({
+                        "type": "url",
+                        "text": display,
+                        "url": href,
+                    })
+                else:
+                    parts.append(display)
+            else:
+                # 普通链接：正常渲染子节点
+                child = merge_rich(render_inline_nodes(node.children))
+                if href and child:
+                    parts.append({
+                        "type": "url",
+                        "text": child,
+                        "url": href,
+                    })
+                elif child:
+                    parts.append(child)
+                elif href:
+                    short = filename_from_url(href) or href.split('/')[-1] or href
+                    parts.append({
+                        "type": "url",
+                        "text": short,
+                        "url": href,
+                    })
 
         else:
+            # 透明未知标签
             parts.append(render_inline_nodes(node.children))
 
     return parts
