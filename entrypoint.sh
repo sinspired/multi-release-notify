@@ -212,32 +212,54 @@ text = os.environ.get("TEXT", "")
 # 全局移除 commit id：匹配行内 40 位十六进制 + ': '
 text = re.sub(r'(?m)\b[0-9a-f]{40}:\s*', '', text)
 
-if mode == "telegram":
-    # 1. t.me 链接优先转为 @username (提升整洁度)
-    text = re.sub(r'\[[^\]]*\]\(https://t\.me/([^)]+)\)', r'@\1', text)
+if mode in ("telegram", "telegram_rich"):
+    # t.me 链接转为 @username
+    text = re.sub(
+        r'\[[^\]]*\]\(https://t\.me/([^)]+)\)',
+        r'@\1',
+        text
+    )
 
-    # 2. 移除纯粹的 commit id 链接，保留文字
-    text = re.sub(r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)', '', text)
+    # 移除纯粹的 commit id 链接
+    text = re.sub(
+        r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)',
+        '',
+        text
+    )
 
-    # 3. 移除 Markdown 图片链接（badge），Telegram 会自拉取 Preview
-    text = re.sub(r'(?m)^[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+\n?', '', text)
+    # 移除 Markdown badge
+    text = re.sub(
+        r'(?m)^[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+\n?',
+        '',
+        text
+    )
 
-    # 4. 清理复杂 HTML 块元素（Telegram不支持 <div>、<table> 等）
-    text = re.sub(r'(?ms)<(div|table|thead|tbody|tr|th|td|br|img)[^>]*>.*?</\1>', '', text)
-    text = re.sub(r'<[a-zA-Z][^>]*/>', '', text)
+    if mode == "telegram":
+        # 普通 Telegram HTML 模式不能识别 table，
+        # 继续保留旧的清理逻辑，供旧式 HTML 模板使用。
+        text = re.sub(
+            r'(?ms)<(div|table|thead|tbody|tr|th|td|br|img)[^>]*>.*?</\1>',
+            '',
+            text
+        )
+        text = re.sub(r'<[a-zA-Z][^>]*/>', '', text)
 
-    # 注意：我们去掉了原文剥离 Markdown 粗体和链接的代码，留给 convert_markdown 处理
+    # Rich Message 模式不能删除 table/div，
+    # 后面的 HTML → RichBlock 转换器会负责处理。
     text = re.sub(r'\n{3,}', '\n\n', text)
 
 # ─── 智能长度截断逻辑 ──────────────────────────────────────────────────────────
 # 保护 Telegram / Discord 等渠道的单条消息长度限制（Telegram是4096）
-limit = 3500 if mode == "telegram" else 6000
-if len(text) > limit:
-    text = text[:limit]
-    # 如果截断正好发生在代码块中间，补齐反引号闭合，防止后面渲染大面积崩溃
-    if text.count("```") % 2 != 0:
-        text += "\n```"
-    text += "\n\n... *(Release notes truncated due to length limits)*"
+if mode != "telegram_rich":
+    limit = 3500 if mode == "telegram" else 6000
+
+    if len(text) > limit:
+        text = text[:limit]
+
+        if text.count("```") % 2 != 0:
+            text += "\n```"
+
+        text += "\n\n... *(Release notes truncated due to length limits)*"
 
 print(text, end="")
 PY
@@ -261,6 +283,839 @@ text = re.sub(
 print(text, end="")
 PY
 }
+
+build_telegram_rich_template() {
+    local source="$1"
+
+    local source_file
+    local template_file
+
+    source_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/telegram-rich-source-XXXXXX")
+    template_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/telegram-rich-XXXXXX.json")
+
+    printf '%s' "$source" > "$source_file"
+
+    if ! TITLE="$TITLE" \
+        SUMMARY="$SUMMARY" \
+        RELEASE_URL="$RELEASE_URL" \
+        python3 - "$source_file" "$template_file" <<'PY'
+import json
+import os
+import re
+import sys
+from html.parser import HTMLParser
+
+
+SOURCE_FILE = sys.argv[1]
+OUTPUT_FILE = sys.argv[2]
+
+TITLE = os.environ.get("TITLE", "")
+SUMMARY = os.environ.get("SUMMARY", "")
+RELEASE_URL = os.environ.get("RELEASE_URL", "")
+
+
+# ---------------------------------------------------------------------------
+# HTML DOM
+# ---------------------------------------------------------------------------
+
+VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img",
+    "input", "link", "meta", "param", "source", "track", "wbr",
+}
+
+
+class Node:
+    __slots__ = ("tag", "attrs", "children", "text")
+
+    def __init__(self, tag=None, attrs=None, text=None):
+        self.tag = tag
+        self.attrs = dict(attrs or [])
+        self.children = []
+        self.text = text
+
+
+class TreeParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = Node("__root__")
+        self.stack = [self.root]
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+
+        node = Node(tag, attrs)
+        self.stack[-1].children.append(node)
+
+        if tag not in VOID_TAGS:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag, attrs):
+        self.stack[-1].children.append(
+            Node(tag.lower(), attrs)
+        )
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+
+        for i in range(len(self.stack) - 1, 0, -1):
+            if self.stack[i].tag == tag:
+                del self.stack[i:]
+                return
+
+    def handle_data(self, data):
+        if data:
+            self.stack[-1].children.append(
+                Node(None, text=data)
+            )
+
+    def handle_comment(self, data):
+        # GitHub HTML comments such as <!-- Android -->
+        # do not belong in Telegram output.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
+def descendants(node, tag):
+    result = []
+
+    for child in node.children:
+        if child.tag == tag:
+            result.append(child)
+
+        result.extend(descendants(child, tag))
+
+    return result
+
+
+def text_content(node, preserve=False):
+    parts = []
+
+    def walk(current):
+        if current.tag is None:
+            parts.append(current.text)
+            return
+
+        if current.tag == "img":
+            parts.append(current.attrs.get("alt", ""))
+            return
+
+        if current.tag == "br":
+            parts.append("\n")
+            return
+
+        for child in current.children:
+            walk(child)
+
+    walk(node)
+
+    text = "".join(parts)
+
+    if preserve:
+        return text
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def merge_rich(parts):
+    result = []
+
+    for part in parts:
+        if part is None or part == "" or part == []:
+            continue
+
+        if isinstance(part, list):
+            result.extend(part)
+        else:
+            result.append(part)
+
+    if not result:
+        return ""
+
+    if len(result) == 1:
+        return result[0]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# RichText
+# ---------------------------------------------------------------------------
+
+def render_inline_nodes(nodes):
+    parts = []
+
+    for node in nodes:
+        if node.tag is None:
+            parts.append(node.text)
+            continue
+
+        tag = node.tag
+
+        if tag == "br":
+            parts.append("\n")
+
+        elif tag == "img":
+            # Media cannot appear inside RichBlockTableCell.
+            # Use the image alt text instead.
+            alt = node.attrs.get("alt", "")
+            if alt:
+                parts.append(alt)
+
+        elif tag in ("b", "strong"):
+            parts.append({
+                "type": "bold",
+                "text": merge_rich(
+                    render_inline_nodes(node.children)
+                ),
+            })
+
+        elif tag in ("i", "em"):
+            parts.append({
+                "type": "italic",
+                "text": merge_rich(
+                    render_inline_nodes(node.children)
+                ),
+            })
+
+        elif tag in ("u", "ins"):
+            parts.append({
+                "type": "underline",
+                "text": merge_rich(
+                    render_inline_nodes(node.children)
+                ),
+            })
+
+        elif tag in ("s", "strike", "del"):
+            parts.append({
+                "type": "strikethrough",
+                "text": merge_rich(
+                    render_inline_nodes(node.children)
+                ),
+            })
+
+        elif tag == "mark":
+            parts.append({
+                "type": "marked",
+                "text": merge_rich(
+                    render_inline_nodes(node.children)
+                ),
+            })
+
+        elif tag == "tg-spoiler":
+            parts.append({
+                "type": "spoiler",
+                "text": merge_rich(
+                    render_inline_nodes(node.children)
+                ),
+            })
+
+        elif tag == "code":
+            parts.append({
+                "type": "code",
+                "text": text_content(node, preserve=True),
+            })
+
+        elif tag == "a":
+            href = node.attrs.get("href", "")
+
+            child = merge_rich(
+                render_inline_nodes(node.children)
+            )
+
+            if href:
+                parts.append({
+                    "type": "url",
+                    "text": child,
+                    "url": href,
+                })
+            else:
+                parts.append(child)
+
+        else:
+            parts.append(
+                render_inline_nodes(node.children)
+            )
+
+    return parts
+
+
+# ---------------------------------------------------------------------------
+# Blocks
+# ---------------------------------------------------------------------------
+
+def render_paragraph(node):
+    rich = merge_rich(
+        render_inline_nodes(node.children)
+    )
+
+    if not rich:
+        return None
+
+    return {
+        "type": "paragraph",
+        "text": rich,
+    }
+
+
+def render_list(node):
+    items = []
+
+    for li in [
+        child for child in node.children
+        if child.tag == "li"
+    ]:
+        content_nodes = [
+            child
+            for child in li.children
+            if child.tag not in ("ul", "ol")
+        ]
+
+        blocks = []
+
+        rich = merge_rich(
+            render_inline_nodes(content_nodes)
+        )
+
+        if rich:
+            blocks.append({
+                "type": "paragraph",
+                "text": rich,
+            })
+
+        for nested in [
+            child
+            for child in li.children
+            if child.tag in ("ul", "ol")
+        ]:
+            blocks.extend(
+                render_blocks(nested)
+            )
+
+        item = {
+            "blocks": blocks or [
+                {
+                    "type": "paragraph",
+                    "text": "",
+                }
+            ]
+        }
+
+        # GitHub task list
+        checkbox = next(
+            (
+                child
+                for child in li.children
+                if child.tag == "input"
+                and child.attrs.get("type") == "checkbox"
+            ),
+            None,
+        )
+
+        if checkbox is not None:
+            item["has_checkbox"] = True
+            item["is_checked"] = (
+                "checked" in checkbox.attrs
+            )
+
+        if node.tag == "ol":
+            item["value"] = len(items) + 1
+
+        items.append(item)
+
+    if not items:
+        return None
+
+    return {
+        "type": "list",
+        "items": items,
+    }
+
+
+def render_table(node):
+    rows = descendants(node, "tr")
+
+    output_rows = []
+
+    for row in rows:
+        cells = []
+
+        for cell in [
+            child
+            for child in row.children
+            if child.tag in ("th", "td")
+        ]:
+            cell_obj = {
+                "text": (
+                    merge_rich(
+                        render_inline_nodes(
+                            cell.children
+                        )
+                    )
+                    or ""
+                )
+            }
+
+            if cell.tag == "th":
+                cell_obj["is_header"] = True
+
+            for attr, key in (
+                ("rowspan", "rowspan"),
+                ("colspan", "colspan"),
+            ):
+                try:
+                    value = int(
+                        cell.attrs.get(attr, "1")
+                    )
+
+                    if value > 1:
+                        cell_obj[key] = value
+
+                except (TypeError, ValueError):
+                    pass
+
+            align = cell.attrs.get("align")
+
+            if align in ("left", "center", "right"):
+                cell_obj["align"] = align
+
+            valign = cell.attrs.get("valign")
+
+            if valign in (
+                "top",
+                "middle",
+                "bottom",
+            ):
+                cell_obj["valign"] = valign
+
+            cells.append(cell_obj)
+
+        if cells:
+            output_rows.append(cells)
+
+    if not output_rows:
+        return None
+
+    max_columns = max(
+        len(row)
+        for row in output_rows
+    )
+
+    if max_columns > 20:
+        return {
+            "type": "paragraph",
+            "text": "Table omitted: more than 20 columns.",
+        }
+
+    table = {
+        "type": "table",
+        "cells": output_rows,
+        "is_bordered": True,
+        "is_striped": True,
+        "is_compact": True,
+    }
+
+    caption = next(
+        (
+            child
+            for child in node.children
+            if child.tag == "caption"
+        ),
+        None,
+    )
+
+    if caption:
+        caption_text = merge_rich(
+            render_inline_nodes(
+                caption.children
+            )
+        )
+
+        if caption_text:
+            table["caption"] = caption_text
+
+    return table
+
+
+def render_blocks(node):
+    result = []
+
+    tag = node.tag
+
+    if tag in (
+        "__root__",
+        "div",
+        "section",
+        "article",
+        "main",
+        "thead",
+        "tbody",
+        "tfoot",
+    ):
+        for child in node.children:
+            result.extend(
+                render_blocks(child)
+            )
+
+        return result
+
+    if tag == "p":
+        block = render_paragraph(node)
+        return [block] if block else []
+
+    if tag in (
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    ):
+        rich = merge_rich(
+            render_inline_nodes(node.children)
+        )
+
+        if not rich:
+            return []
+
+        return [{
+            "type": "heading",
+            "text": rich,
+            "size": int(tag[1]),
+        }]
+
+    if tag == "pre":
+        code = next(
+            iter(
+                descendants(node, "code")
+            ),
+            None,
+        )
+
+        raw = text_content(
+            node,
+            preserve=True,
+        ).strip("\n")
+
+        block = {
+            "type": "pre",
+            "text": raw,
+        }
+
+        if code:
+            match = re.search(
+                r"(?:^|\s)language-([\w+-]+)",
+                code.attrs.get("class", ""),
+            )
+
+            if match:
+                block["language"] = match.group(1)
+
+        return [block]
+
+    if tag == "hr":
+        return [{
+            "type": "divider"
+        }]
+
+    if tag in ("ul", "ol"):
+        block = render_list(node)
+        return [block] if block else []
+
+    if tag == "blockquote":
+        if "expandable" in node.attrs:
+            rich = merge_rich(
+                render_inline_nodes(
+                    node.children
+                )
+            )
+
+            if rich:
+                return [{
+                    "type": "expandable_blockquote",
+                    "text": rich,
+                }]
+
+            return []
+
+        inner = []
+
+        for child in node.children:
+            inner.extend(
+                render_blocks(child)
+            )
+
+        if inner:
+            return [{
+                "type": "blockquote",
+                "blocks": inner,
+            }]
+
+        return []
+
+    if tag == "table":
+        block = render_table(node)
+        return [block] if block else []
+
+    if tag is None:
+        text = re.sub(
+            r"\s+",
+            " ",
+            node.text,
+        ).strip()
+
+        if text:
+            return [{
+                "type": "paragraph",
+                "text": text,
+            }]
+
+        return []
+
+    # Unknown tags are transparent unless they contain
+    # pure inline content.
+    rich = merge_rich(
+        render_inline_nodes(node.children)
+    )
+
+    child_has_block = any(
+        child.tag in (
+            "p",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "ul",
+            "ol",
+            "blockquote",
+            "table",
+            "pre",
+            "hr",
+        )
+        for child in node.children
+    )
+
+    if rich and not child_has_block:
+        return [{
+            "type": "paragraph",
+            "text": rich,
+        }]
+
+    for child in node.children:
+        result.extend(
+            render_blocks(child)
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Markdown -> HTML -> Rich Blocks
+# ---------------------------------------------------------------------------
+
+def markdown_to_root(source):
+    try:
+        import markdown
+    except ImportError as exc:
+        raise RuntimeError(
+            "Python package 'markdown' is required."
+        ) from exc
+
+    html = markdown.markdown(
+        source,
+        extensions=["extra"],
+    )
+
+    parser = TreeParser()
+
+    parser.feed(html)
+    parser.close()
+
+    return parser.root
+
+
+with open(
+    SOURCE_FILE,
+    "r",
+    encoding="utf-8",
+) as f:
+    source = f.read()
+
+
+# Telegram-specific preprocessing.
+source = re.sub(
+    r"\[[^\]]*\]\(https://t\.me/([^)]+)\)",
+    r"@\1",
+    source,
+)
+
+source = re.sub(
+    r"\s*\(\[`[0-9a-f]{4,40}`\]"
+    r"\(https://[^)]+/commit/[^)]+\)\)",
+    "",
+    source,
+)
+
+# Remove badge-only Markdown lines.
+source = re.sub(
+    r"(?m)^[ \t]*"
+    r"(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+"
+    r"\n?",
+    "",
+    source,
+)
+
+source = re.sub(
+    r"\n{3,}",
+    "\n\n",
+    source,
+)
+
+
+root = markdown_to_root(source)
+
+release_blocks = render_blocks(root)
+
+
+# ---------------------------------------------------------------------------
+# Header / summary / footer
+# ---------------------------------------------------------------------------
+
+blocks = []
+
+if TITLE:
+    blocks.append({
+        "type": "heading",
+        "text": TITLE,
+        "size": 2,
+    })
+
+blocks.append({
+    "type": "divider",
+})
+
+
+if SUMMARY:
+    summary_root = markdown_to_root(SUMMARY)
+
+    summary_blocks = render_blocks(
+        summary_root
+    )
+
+    blocks.append({
+        "type": "details",
+        "summary": "📋 Summary",
+        "is_open": False,
+        "blocks": summary_blocks or [{
+            "type": "paragraph",
+            "text": SUMMARY,
+        }],
+    })
+
+blocks.append({
+    "type": "heading",
+    "text": "📝 Release Notes",
+    "size": 3,
+})
+
+
+MAX_TEMPLATE_BYTES = 34000
+
+
+def footer_block():
+    if RELEASE_URL:
+        return {
+            "type": "footer",
+            "text": [{
+                "type": "url",
+                "text": "View on GitHub →",
+                "url": RELEASE_URL,
+            }],
+        }
+
+    return {
+        "type": "footer",
+        "text": "View on GitHub →",
+    }
+
+
+def make_payload(release):
+    return {
+        "blocks": (
+            blocks
+            + release
+            + [footer_block()]
+        )
+    }
+
+
+payload = make_payload(
+    release_blocks
+)
+
+
+def payload_size(value):
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    return len(
+        encoded.encode("utf-8")
+    )
+
+
+# Rich template files are also limited by Apprise.
+# Trim whole release blocks rather than corrupting
+# HTML/Markdown in the middle of a table or code block.
+if payload_size(payload) > MAX_TEMPLATE_BYTES:
+    while (
+        release_blocks
+        and payload_size(payload) > 33000
+    ):
+        release_blocks.pop()
+        payload = make_payload(
+            release_blocks
+        )
+
+    release_blocks.append({
+        "type": "footer",
+        "text": "… Release notes truncated.",
+    })
+
+    payload = make_payload(
+        release_blocks
+    )
+
+
+with open(
+    OUTPUT_FILE,
+    "w",
+    encoding="utf-8",
+) as f:
+    json.dump(
+        payload,
+        f,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+PY
+    then
+        rm -f "$source_file" "$template_file"
+        return 1
+    fi
+
+    rm -f "$source_file"
+
+    printf '%s\n' "$template_file"
+}
+
 
 build_summary_section_html() {
     local summary="$1"
@@ -480,6 +1335,30 @@ decorate_url() {
     echo "$url"
 }
 
+append_url_param() {
+    local url="$1"
+    local key="$2"
+    local value="$3"
+
+    local sep encoded
+
+    if [[ "$url" == *"?"* ]]; then
+        sep="&"
+    else
+        sep="?"
+    fi
+
+    encoded=$(python3 -c \
+        'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+        "$value")
+
+    printf '%s%s%s=%s\n' \
+        "$url" \
+        "$sep" \
+        "$key" \
+        "$encoded"
+}
+
 # Template render
 render_template() {
     local tpl_file="$1"
@@ -625,26 +1504,106 @@ send_channel() {
 
     [[ -z "$raw_url" ]] && return 0
 
+    # -------------------------------------------------------------------------
+    # Telegram 默认使用 Telegram Rich Message
+    #
+    # Apprise v2.0.1 会根据 ?template= 直接调用 Telegram sendRichMessage，
+    # 而不是传统的 sendMessage(parse_mode=HTML)。
+    # -------------------------------------------------------------------------
+    if [[ "$label" == "Telegram" && -z "$user_tpl" ]]; then
+        echo "📄 [Telegram] Using Telegram Rich Message."
+
+        local rich_template
+        local url
+        local rc
+
+        if ! rich_template=$(build_telegram_rich_template "$MESSAGE"); then
+            echo "::error::[Telegram] Failed to build Rich Message template."
+            return 1
+        fi
+
+        url=$(decorate_url "$raw_url" "$ICON_URL")
+        url=$(append_url_param "$url" "template" "$rich_template")
+
+        if run_apprise \
+            "Telegram" \
+            "$MESSAGE" \
+            "html" \
+            "$url" \
+            "true"; then
+
+            rm -f "$rich_template"
+            return 0
+        else
+            rc=$?
+            rm -f "$rich_template"
+            return "$rc"
+        fi
+    fi
+
+    # -------------------------------------------------------------------------
+    # Telegram 自定义 JSON 模板：
+    # 用户可以直接提供 Apprise Rich Message JSON。
+    # -------------------------------------------------------------------------
+    if [[ "$label" == "Telegram" \
+            && -n "$user_tpl" \
+            && "${user_tpl,,}" == *.json \
+            && -f "${GITHUB_WORKSPACE:-/github/workspace}/${user_tpl}" ]]; then
+
+        local rich_template
+        local url
+
+        rich_template="${GITHUB_WORKSPACE:-/github/workspace}/${user_tpl}"
+
+        echo "📄 [Telegram] Using Rich Message template: ${user_tpl}"
+
+        url=$(decorate_url "$raw_url" "$ICON_URL")
+        url=$(append_url_param "$url" "template" "$rich_template")
+
+        run_apprise \
+            "Telegram" \
+            "$MESSAGE" \
+            "html" \
+            "$url" \
+            "true"
+
+        return $?
+    fi
+
+    # -------------------------------------------------------------------------
+    # 其它渠道 / Telegram 旧式 HTML 自定义模板
+    # -------------------------------------------------------------------------
     local tpl_file
 
-    if [[ -n "$user_tpl" && -f "${GITHUB_WORKSPACE:-/github/workspace}/${user_tpl}" ]]; then
+    if [[ -n "$user_tpl" \
+            && -f "${GITHUB_WORKSPACE:-/github/workspace}/${user_tpl}" ]]; then
+
         tpl_file="${GITHUB_WORKSPACE:-/github/workspace}/${user_tpl}"
+
         echo "📄 [${label}] Using custom template: ${user_tpl}"
+
     else
         tpl_file="$builtin_tpl"
     fi
 
     local body url
+
     body=$(render_template "$tpl_file" "$fmt")
 
-    # Telegram HTML 兜底：修复任何未转义的 & 防止 Telegram API 解析报错
+    # Telegram 旧式 HTML 模板仍然需要这个兜底。
+    # Rich Message 模式不会进入这里。
     if [[ "$label" == "Telegram" && "$fmt" == "html" ]]; then
         body=$(sanitize_telegram_html "$body")
     fi
 
     url=$(decorate_url "$raw_url" "$ICON_URL")
 
-    run_apprise "${label}" "${body}" "${fmt}" "${url}" "true"
+    run_apprise \
+        "${label}" \
+        "${body}" \
+        "${fmt}" \
+        "${url}" \
+        "true"
 }
 
 # Send built-in channels
