@@ -220,11 +220,11 @@ if mode in ("telegram", "telegram_rich"):
         text
     )
 
-    # 移除纯粹的 commit id 链接
-    text = re.sub(
-        r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)',
-        '',
-        text
+    # 保留 GitHub commit 短 hash，并让它可点击
+    source = re.sub(
+        r'\(\[`([0-9a-f]{4,40})`\]\((https://[^)]+/commit/[^)]+)\)\)',
+        r'([`\1`](\2))',
+        source,
     )
 
     # 移除 Markdown badge
@@ -840,9 +840,10 @@ source = re.sub(
     source,
 )
 
+# 保留 GitHub commit 短 hash，并让它可点击
 source = re.sub(
-    r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)',
-    '',
+    r'\(\[`([0-9a-f]{4,40})`\]\((https://[^)]+/commit/[^)]+)\)\)',
+    r'([`\1`](\2))',
     source,
 )
 
