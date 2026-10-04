@@ -69,40 +69,41 @@ def escape_plain(s: str) -> str:
 
 def md_to_telegram(s: str) -> str:
     md = is_markdown(s)
-
-    # Telegram HTML 必须先转义原始文本
+    # Telegram HTML 必须先转义原始文本 (<, >, &)
     s = escape_plain(s)
 
     if not md:
         return s.strip()
 
-    # 标题 → <b>
-    s = re.sub(r"^(#{1,6})\s+(.*)$", r"<b>\2</b>", s, flags=re.MULTILINE)
+    # 1. 提取并保护代码块，避免内部字符被后续正则误伤
+    blocks = []
+    def save_block(m):
+        blocks.append(f"<pre>{m.group(1)}</pre>")
+        return f"__CODEBLOCK_{len(blocks)-1}__"
+    s = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n?```", save_block, s, flags=re.DOTALL)
 
-    # **bold** / __bold__
-    s = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", s)
-    s = re.sub(r"__(.*?)__",     r"<b>\1</b>", s)
+    # 2. 提取并保护行内代码
+    inlines = []
+    def save_inline(m):
+        inlines.append(f"<code>{m.group(1)}</code>")
+        return f"__INLINE_{len(inlines)-1}__"
+    s = re.sub(r"`([^`\n]+)`", save_inline, s)
 
-    # *italic*（避免匹配 **bold**）
-    s = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", s)
+    # 3. 处理基础 Markdown
+    s = re.sub(r"^(#{1,6})\s+(.*)$", r"<b>\2</b>", s, flags=re.MULTILINE)  # 标题
+    s = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", s)                         # 粗体
+    s = re.sub(r"__(.*?)__", r"<b>\1</b>", s)                             # 粗体
+    s = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", s)    # 斜体
+    s = re.sub(r"^\s*[-*]\s+(.*)$", r"• \1", s, flags=re.MULTILINE)       # 列表
 
-    # 列表
-    s = re.sub(r"^\s*[-*]\s+(.*)$", r"• \1", s, flags=re.MULTILINE)
-
-    # [text](url) → <a href="url">text</a>
+    # 4. 将 Markdown 链接转为 Telegram HTML 链接
     s = re.sub(r"\[([^\]]*?)\]\((.*?)\)", r'<a href="\2">\1</a>', s)
 
-    # 代码块 ```lang\n...\n``` → <pre>...</pre>
-    def codeblock(m):
-        code = (
-            m.group(1)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        return f"<pre>{code}</pre>"
-
-    s = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", codeblock, s, flags=re.DOTALL)
+    # 5. 还原行内代码和代码块
+    for i, inline in enumerate(inlines):
+        s = s.replace(f"__INLINE_{i}__", inline)
+    for i, block in enumerate(blocks):
+        s = s.replace(f"__CODEBLOCK_{i}__", block)
 
     # 清理多余空行
     s = re.sub(r"\n{3,}", "\n\n", s)
@@ -208,67 +209,37 @@ import re
 mode = os.environ.get("MODE", "")
 text = os.environ.get("TEXT", "")
 
-# 移除 commit id：匹配行内 40 位十六进制 + ': '
-# 例：`* defddc5891cba6ce8406030dc4b1acaf5a5de637: fix: 描述` → `* fix: 描述`
+# 全局移除 commit id：匹配行内 40 位十六进制 + ': '
 text = re.sub(r'(?m)\b[0-9a-f]{40}:\s*', '', text)
 
 if mode == "telegram":
-    # 1. Markdown 标题：去掉 # 前缀，保留文字
-    text = re.sub(r'(?m)^#{1,6}\s+', '', text)
+    # 1. t.me 链接优先转为 @username (提升整洁度)
+    text = re.sub(r'\[[^\]]*\]\(https://t\.me/([^)]+)\)', r'@\1', text)
 
-    # 2. **bold** / __bold__：去掉标记，保留文字
-    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
-    text = re.sub(r'__(.*?)__',     r'\1', text)
+    # 2. 移除纯粹的 commit id 链接，保留文字
+    text = re.sub(r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)', '', text)
 
-    # 3. 列表标记：去掉行首 * / - 保留文字（保留缩进）
-    #    * fix: 描述  →  fix: 描述
-    text = re.sub(r'(?m)^(\s*)[-*]\s+', r'\1', text)
-
-    # 4. t.me 链接优先转为 @username
-    text = re.sub(
-        r'\[[^\]]*\]\(https://t\.me/([^)]+)\)',
-        r'@\1',
-        text
-    )
-
-    # 5. 移除 cliff commit id 链接（含外层括号）
-    # Fix bug ([`1847dd0`](https://github.com/.../commit/abc...)) → Fix bug
-    text = re.sub(
-        r'\s*\(\[`[0-9a-f]{4,40}`\]\(https://[^)]+/commit/[^)]+\)\)',
-        '',
-        text
-    )
-
-    # 移除 commit id
-    text = re.sub(r'(?m)\b[0-9a-f]{40}:\s*', '', text)
-
-    # ── 快捷下载区块：保留标题和说明文字，移除 badge/链接/HTML ──
-
-    # 1. Markdown 图片链接（badge）：整行只有 ![...](...)  → 删整行
-    #    多个 badge 挤在同一行也一并清掉
+    # 3. 移除 Markdown 图片链接（badge），Telegram 会自拉取 Preview
     text = re.sub(r'(?m)^[ \t]*(?:!\[[^\]]*\]\([^)]*\)[ \t]*)+\n?', '', text)
 
-    # 2. 剩余行内普通 Markdown 链接（commit id 链接等）：只删标记，保留显示文字
-    #    [text](url) → text
-    text = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', text)
-
-    # 3. HTML 块元素（<div>/<table>/<thead>/<tbody>/<tr>/<th>/<td>/<a> 等）
-    #    匹配从开标签到对应闭标签的整块，含跨行内容
-    text = re.sub(r'(?ms)<(div|table|thead|tbody|tr|th|td|a|br|img)[^>]*>.*?</\1>', '', text)
-    # 自闭合标签（<br/> <img/>）
+    # 4. 清理复杂 HTML 块元素（Telegram不支持 <div>、<table> 等）
+    text = re.sub(r'(?ms)<(div|table|thead|tbody|tr|th|td|br|img)[^>]*>.*?</\1>', '', text)
     text = re.sub(r'<[a-zA-Z][^>]*/>', '', text)
 
-    # 4. 清理多余空行（连续 3 行以上空行压缩为 2 行）
+    # 注意：我们去掉了原文剥离 Markdown 粗体和链接的代码，留给 convert_markdown 处理
     text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # 6. 其余普通链接：保留显示文字并附上 URL
-    #    [v2.5.0...v2.5.1](https://github.com/...) → v2.5.0...v2.5.1 https://github.com/...
-    text = re.sub(r'\[([^\]]*)\]\(([^)]*)\)', r'\1 \2', text)
+# ─── 智能长度截断逻辑 ──────────────────────────────────────────────────────────
+# 保护 Telegram / Discord 等渠道的单条消息长度限制（Telegram是4096）
+limit = 3500 if mode == "telegram" else 6000
+if len(text) > limit:
+    text = text[:limit]
+    # 如果截断正好发生在代码块中间，补齐反引号闭合，防止后面渲染大面积崩溃
+    if text.count("```") % 2 != 0:
+        text += "\n```"
+    text += "\n\n... *(Release notes truncated due to length limits)*"
 
-    # 兜底：清理所有残留 HTML 标签
-    text = re.sub(r'<[^>]+>', '', text)
-
-print(text, end="")
+    print(text, end="")
 PY
 }
 
@@ -281,7 +252,8 @@ import re
 
 text = os.environ.get("TEXT", "")
 
-# 将未转义的 & 修复为 &amp;（已是合法实体的不重复转义）
+# 将未转义的 & 修复为 &amp;
+# 已经是合法 HTML 实体的 & 不重复转义。
 text = re.sub(
     r"&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)",
     "&amp;",
@@ -521,10 +493,10 @@ render_template() {
             summary_section="${SUMMARY_SECTION_HTML}"
             ;;
         telegram_html)
-            # Telegram：移除 commit id + 将 t.me 链接转为 @username，再转纯文本放进 <pre>
+            # Telegram：处理后转为纯净的 Telegram HTML 格式 (<b>, <a>, <code>)
             local _msg_clean
             _msg_clean=$(preprocess_changelog "telegram" "$MESSAGE")
-            processed_msg=$(convert_markdown "plain" "$_msg_clean")
+            processed_msg=$(convert_markdown "telegram" "$_msg_clean")
             summary_section="${SUMMARY_SECTION_TG}"
             ;;
         markdown)
