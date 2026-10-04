@@ -425,26 +425,34 @@ def merge_rich(parts):
 def render_inline_nodes(nodes):
     parts = []
 
+    def filename_from_url(url: str) -> str:
+        """从下载链接提取干净的文件名"""
+        if not url:
+            return ""
+        # 去掉查询参数和锚点
+        path = url.split('?')[0].split('#')[0]
+        name = path.rstrip('/').split('/')[-1]
+        # 简单过滤一下无意义的情况
+        if name and '.' in name and not name.startswith('.'):
+            return name
+        return ""
+
     def img_fallback_text(node):
-        """优先 alt，其次从 shields.io / badge URL 提取文字，最后用文件名"""
+        """图片文字兜底（仅在没有更好选择时使用）"""
         alt = (node.attrs.get("alt") or "").strip()
         if alt:
             return alt
 
         src = node.attrs.get("src", "") or ""
-        # shields.io / custom-icon-badges 常见格式
-        # https://img.shields.io/badge/APK-ARMv8-168039.svg?logo=android
-        # https://custom-icon-badges.demolab.com/badge/Setup-x64-2d7d9a.svg?logo=windows11
         m = re.search(r'/badge/([^/?#]+)', src)
         if m:
-            # 把 APK-ARMv8 变成 APK ARMv8
-            label = m.group(1).replace('%20', ' ').replace('_', ' ').replace('-', ' ')
-            return label
-
-        # 普通图片，尝试取文件名
-        filename = src.rstrip('/').split('/')[-1]
-        if filename and not filename.startswith('?'):
-            return filename.split('?')[0]
+            # 只取 badge 文字部分，去掉颜色
+            label = m.group(1)
+            # 常见格式：APK-ARMv8-168039 或 APK-ARMv8_Lite-96ed89
+            # 我们只保留前面有意义的部分
+            parts = re.split(r'[-_](?=[0-9a-fA-F]{3,8}$)', label)
+            label = parts[0] if parts else label
+            return label.replace('_', ' ').replace('-', ' ').strip()
 
         return ""
 
@@ -460,7 +468,7 @@ def render_inline_nodes(nodes):
             parts.append("\n")
 
         elif tag == "img":
-            # 表格单元格内不能放真正图片，只能用文字代替
+            # 单独图片（不在链接里）才用这个
             text = img_fallback_text(node)
             if text:
                 parts.append(text)
@@ -511,13 +519,22 @@ def render_inline_nodes(nodes):
             href = node.attrs.get("href", "")
             child = merge_rich(render_inline_nodes(node.children))
 
-            # 如果链接内容只是一个图片且没有文字，用图片文字作为链接文字
-            if not child or (isinstance(child, str) and not child.strip()):
-                # 再尝试从子节点的 img 提取
-                for c in node.children:
-                    if c.tag == "img":
-                        child = img_fallback_text(c)
-                        break
+            # 核心优化：如果链接内容几乎是空的（只有图片），优先用下载文件名
+            has_meaningful_text = child and (
+                not isinstance(child, str) or child.strip()
+            )
+
+            if not has_meaningful_text and href:
+                # 优先用链接里的文件名
+                fname = filename_from_url(href)
+                if fname:
+                    child = fname
+                else:
+                    # 再尝试从图片提取
+                    for c in node.children:
+                        if c.tag == "img":
+                            child = img_fallback_text(c)
+                            break
 
             if href and child:
                 parts.append({
@@ -528,8 +545,8 @@ def render_inline_nodes(nodes):
             elif child:
                 parts.append(child)
             elif href:
-                # 最后的兜底：显示域名或文件名
-                short = href.split('/')[-1] or href
+                # 最终兜底
+                short = filename_from_url(href) or href.split('/')[-1] or href
                 parts.append({
                     "type": "url",
                     "text": short,
@@ -537,7 +554,6 @@ def render_inline_nodes(nodes):
                 })
 
         else:
-            # 透明未知标签
             parts.append(render_inline_nodes(node.children))
 
     return parts
